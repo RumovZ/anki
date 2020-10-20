@@ -11,9 +11,9 @@ use nom::{
     branch::alt,
     bytes::complete::{escaped, is_not, tag, take_while1},
     character::complete::{anychar, char, one_of},
-    combinator::{all_consuming, map, map_res},
+    combinator::{all_consuming, map, map_res, map_parser},
     sequence::{delimited, preceded, tuple},
-    {multi::many0, IResult},
+    {multi::{many0, fold_many0}, IResult},
 };
 use regex::Regex;
 use std::{borrow::Cow, num};
@@ -89,6 +89,7 @@ pub(super) enum SearchNode<'a> {
     Regex(Cow<'a, str>),
     NoCombining(Cow<'a, str>),
     WordBoundary(Cow<'a, str>),
+    Math(Vec<MathNode>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -116,6 +117,22 @@ pub(super) enum StateKind {
 pub(super) enum TemplateKind {
     Ordinal(u16),
     Name(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub(super) enum MathNode {
+    Literal(String),
+    Property(PropertyName),
+    Field(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub(super) enum PropertyName {
+    Ivl,
+    Due,
+    Reps,
+    Lapses,
+    Ease,
 }
 
 /// Parse the input string into a list of nodes.
@@ -295,6 +312,7 @@ fn search_node_for_text_with_argument<'a>(
         "re" => SearchNode::Regex(val),
         "nc" => SearchNode::NoCombining(val),
         "w" => SearchNode::WordBoundary(val),
+        "math" => parse_math(val.as_ref())?,
         // anything else is a field search
         _ => parse_single_field(key.as_ref(), val.as_ref()),
     })
@@ -432,6 +450,97 @@ fn parse_single_field(key: &str, mut val: &str) -> SearchNode<'static> {
     }
 }
 
+fn parse_math(s: &str) -> ParseResult<SearchNode<'static>> {
+    let (_, (mut exp1, op, exp2)) = all_consuming(tuple((
+        math_parse_expression,
+        math_parse_eq_operator,
+        math_parse_expression,
+    )))(s)?;
+    Ok(SearchNode::Math( { exp1.push(op); exp1.extend(exp2); exp1 } ))
+}
+
+fn math_parse_eq_operator(s: &str) -> IResult<&str, MathNode> {
+    map(
+        alt((
+            tag("!="),
+            tag("<="),
+            tag(">="),
+            tag("="),
+            tag("<"),
+            tag(">"),
+        )),
+        |c: &str| { MathNode::Literal(c.to_string()) }
+    )(s)
+}
+
+fn math_parse_expression(s: &str) -> IResult<&str, Vec<MathNode>> {
+    map(tuple((
+            math_parse_signed_operand,
+            fold_many0(
+                math_parse_operation,
+                Vec::new(),
+                |mut v, o| { v.extend(o); v }
+            )
+        )),
+        |mut t| { t.0.extend(t.1); t.0 }
+    )(s)
+}
+
+fn math_parse_operation(s: &str) -> IResult<&str, Vec<MathNode>> {
+    map(tuple((
+            one_of("+-*/"),
+            math_parse_signed_operand
+        )),
+        |mut t| { t.1.insert(0, MathNode::Literal(t.0.to_string())); t.1 }
+    )(s)
+}
+
+fn math_parse_signed_operand(s: &str) -> IResult<&str, Vec<MathNode>> {
+    map(tuple((
+            math_parse_signs,
+            math_parse_operand
+        )),
+        |mut t| { t.0.push(t.1); t.0 }
+    )(s)
+}
+
+fn math_parse_signs(s: &str) -> IResult<&str, Vec<MathNode>> {
+    many0(map(
+        one_of("+-"),
+        |c| { MathNode::Literal(c.to_string()) }
+    ))(s)
+}
+
+fn math_number(s: &str) -> IResult<&str, MathNode> {
+    match s.parse::<f32>() {
+        Ok(f) => Ok(("", MathNode::Literal(f.to_string()))),
+        Err(_) => Err(nom::Err::Error((s, nom::error::ErrorKind::Float)))
+    }
+}
+
+fn math_prop(s: &str) -> IResult<&str, MathNode> {
+    use PropertyName::*;
+    Ok(("", MathNode::Property(match s {
+        "ivl" => Ivl,
+        "due" => Due,
+        "reps" => Reps,
+        "lapses" => Lapses,
+        "ease" => Ease,
+        _ => return Err(nom::Err::Error((s, nom::error::ErrorKind::Tag)))
+    })))
+}
+
+fn math_field(s: &str) -> IResult<&str, MathNode> {
+    Ok(("", MathNode::Field(s.to_string())))
+}
+
+fn math_parse_operand(s: &str) -> IResult<&str, MathNode> {
+    map_parser(
+        is_not("+-*/!=<>"),
+        alt((math_prop, math_number, math_field))
+    )(s)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -563,5 +672,57 @@ mod test {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn math_parsing() {
+        use MathNode::*;
+        use PropertyName::*;
+
+        // number literals get normalised
+        assert_eq!(parse_math("0.1+.1<1.+1").unwrap(),
+            SearchNode::Math(vec![
+                Literal("0.1".to_string()),
+                Literal("+".to_string()),
+                Literal("0.1".to_string()),
+                Literal("<".to_string()),
+                Literal("1".to_string()),
+                Literal("+".to_string()),
+                Literal("1".to_string()),
+            ])
+        );
+
+        // chained signs are valid
+        assert_eq!(parse_math("+-ease=ivl").unwrap(),
+            SearchNode::Math(vec![
+                Literal("+".to_string()),
+                Literal("-".to_string()),
+                Property(Ease),
+                Literal("=".to_string()),
+                Property(Ivl),
+            ])
+        );
+
+        // fields may contain spaces
+        assert_eq!(parse_math("s p a c e!=space").unwrap(),
+            SearchNode::Math(vec![
+                Field("s p a c e".to_string()),
+                Literal("!=".to_string()),
+                Field("space".to_string()),
+            ])
+        );
+
+        // chained operators are invalid
+        assert!(parse_math("1-*1<0").is_err());
+
+        // one and only one equality operator is valid
+        assert!(parse_math("1<2<3").is_err());
+        assert!(parse_math("1!2").is_err());
+        assert!(parse_math("123").is_err());
+
+        // incomplete expressions are invalid
+        assert!(parse_math("1>0*").is_err());
+        assert!(parse_math("!=1").is_err());
+        assert!(parse_math("-=minus").is_err());
     }
 }

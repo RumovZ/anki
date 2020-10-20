@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::parser::{Node, PropertyKind, SearchNode, StateKind, TemplateKind};
+use super::parser::{Node, PropertyKind, SearchNode, StateKind, TemplateKind, MathNode, PropertyName};
 use crate::{
     card::{CardQueue, CardType},
     collection::Collection,
@@ -161,6 +161,7 @@ impl SqlWriter<'_> {
             }
             SearchNode::Property { operator, kind } => self.write_prop(operator, kind)?,
             SearchNode::WholeCollection => write!(self.sql, "true").unwrap(),
+            SearchNode::Math(math_nodes) => self.write_math(math_nodes)?,
         };
         Ok(())
     }
@@ -459,6 +460,88 @@ impl SqlWriter<'_> {
         let re = text_to_re(word);
         self.write_regex(&format!(r"\b{}\b", re))
     }
+
+    fn write_math(&mut self, nodes: &Vec<MathNode>) -> Result<()> {
+        use MathNode::*;
+        let mut due = false;
+        let mut query = Vec::new();
+        let mut fields = Vec::new();
+        for node in nodes {
+            match node {
+                Literal(l) => query.push(l.to_string()),
+                Property(p) => query.push(self.prop_to_str(p, &mut due)?),
+                Field(f) => {
+                    fields.push((query.len(), f));
+                    query.push("".to_string());
+                },
+            };
+        }
+        if due {
+            write!(
+                self.sql,
+                "c.queue in ({rev},{daylrn}) and ",
+                rev = CardQueue::Review as u8,
+                daylrn = CardQueue::DayLearn as u8,
+            ).unwrap();
+        }
+        if fields.is_empty() {
+            write!(self.sql, "({})", query.join(" ")).unwrap();
+            Ok(())
+        } else {
+            let note_types = self.col.get_all_notetypes()?;
+            let mut field_map = vec![];
+            'nt_loop: for nt in note_types.values() {
+                let mut nt_map = (nt.id, Vec::new());
+                'field_loop: for field in &fields {
+                    for nt_field in &nt.fields {
+                        if *field.1 == nt_field.name {
+                            nt_map.1.push(nt_field.ord.unwrap_or_default());
+                            continue 'field_loop;
+                        }
+                    }
+                    continue 'nt_loop;
+                }
+                field_map.push(nt_map);
+            }
+            if field_map.is_empty() {
+                write!(self.sql, "false").unwrap();
+                return Ok(());
+            }
+            let mut searches = Vec::new();
+            for nt_map in field_map {
+                let mut ords = nt_map.1.iter();
+                for field in &fields {
+                    query[field.0] = format!(
+                        "cast(field_at_index(n.flds, {}) as real)",
+                        ords.next().unwrap(),
+                    );
+                }
+                searches.push(format!(
+                    "(n.mid = {} and {})",
+                    nt_map.0,
+                    query.join(" ")
+                ));
+            }
+            write!(self.sql, "({})", searches.join(" or ")).unwrap();
+            Ok(())
+        }
+	}
+
+    fn prop_to_str(&mut self, prop: &PropertyName, due: &mut bool) -> Result<String> {
+        use PropertyName::*;
+        let result = match prop {
+            Due => {
+                *due = true;
+                let days = self.col.timing_today()?.days_elapsed as i32;
+                format!("((due - {}) * 1.)", days)
+            },
+            Ivl => "(ivl * 1.)".to_string(),
+            Reps => "(reps * 1.)".to_string(),
+            Lapses => "(lapses * 1.)".to_string(),
+            Ease => "(factor / 1000.)".to_string(),
+        };
+        Ok(result)
+    }
 }
 
 /// Replace * with %, leaving \* alone.
@@ -545,6 +628,8 @@ impl SearchNode<'_> {
             SearchNode::WholeCollection => RequiredTable::CardsOrNotes,
 
             SearchNode::CardTemplate(_) => RequiredTable::CardsAndNotes,
+
+            SearchNode::Math(_) => RequiredTable::CardsAndNotes,
         }
     }
 }
