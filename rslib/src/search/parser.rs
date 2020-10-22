@@ -574,12 +574,15 @@ fn math_prop(s: &str) -> IResult<&str, MathNode> {
 }
 
 fn math_field(s: &str) -> IResult<&str, MathNode> {
-    Ok(("", MathNode::Field(s.to_string())))
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"\\(.)").unwrap();
+    }
+    Ok(("", MathNode::Field(RE.replace_all(s, "$1").to_string())))
 }
 
 fn math_parse_operand(s: &str) -> IResult<&str, MathNode> {
     map_parser(
-        is_not("+-*/!=<>"),
+        escaped(is_not(r"\+-*/!=<>()"), '\\', anychar),
         alt((math_prop, math_number, math_field))
     )(s)
 }
@@ -754,6 +757,17 @@ mod test {
                 Field("s p a c e".to_string()),
                 EqOperator(Neq),
                 Field("space".to_string()),
+            ])
+        );
+
+        // (only) fields may contain escaped characters
+        assert_eq!(parse_math(r"\ivl+2\-1>=f\!e\\d").unwrap(),
+            SearchNode::Math(vec![
+                Field("ivl".to_string()),
+                Operator(Plus),
+                Field("2-1".to_string()),
+                EqOperator(GreaterEq),
+                Field(r"f!e\d".to_string()),
             ])
         );
 
