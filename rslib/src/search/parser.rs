@@ -9,10 +9,10 @@ use crate::{
 use lazy_static::lazy_static;
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, is_not, tag, take_while1},
+    bytes::complete::{escaped, is_not, tag, take_while1, is_a},
     character::complete::{anychar, char, one_of},
     combinator::{all_consuming, map, map_res, map_parser},
-    sequence::{delimited, preceded, tuple},
+    sequence::{delimited, preceded, tuple, pair},
     {multi::{many0, fold_many0}, IResult},
 };
 use regex::Regex;
@@ -121,9 +121,29 @@ pub(super) enum TemplateKind {
 
 #[derive(Debug, PartialEq, Clone)]
 pub(super) enum MathNode {
-    Literal(String),
+    EqOp(EqOperator),
+    Op(Operator),
+    Number(f32),
     Property(PropertyName),
     Field(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub(super) enum EqOperator {
+    Eq,
+    Neq,
+    Less,
+    LessEq,
+    Greater,
+    GreaterEq,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub(super) enum Operator {
+    Plus,
+    Minus,
+    Times,
+    Div,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -460,60 +480,83 @@ fn parse_math(s: &str) -> ParseResult<SearchNode<'static>> {
 }
 
 fn math_parse_eq_operator(s: &str) -> IResult<&str, MathNode> {
-    map(
-        alt((
-            tag("!="),
-            tag("<="),
-            tag(">="),
-            tag("="),
-            tag("<"),
-            tag(">"),
-        )),
-        |c: &str| { MathNode::Literal(c.to_string()) }
+    use EqOperator::*;
+    map_res(
+        is_a("<>=!"),
+        |c: &str| { Ok(MathNode::EqOp( match c {
+            "!=" => Neq,
+            "<=" => LessEq,
+            ">=" => GreaterEq,
+            "=" => Eq,
+            "<" => Less,
+            ">" => Greater,
+            _ => return Err(nom::Err::Error((s, nom::error::ErrorKind::Tag))),
+        }))}
     )(s)
 }
 
 fn math_parse_expression(s: &str) -> IResult<&str, Vec<MathNode>> {
-    map(tuple((
+    map(
+        pair(
             math_parse_signed_operand,
             fold_many0(
                 math_parse_operation,
                 Vec::new(),
                 |mut v, o| { v.extend(o); v }
             )
-        )),
-        |mut t| { t.0.extend(t.1); t.0 }
+        ),
+        |mut p| { p.0.extend(p.1); p.0 }
     )(s)
 }
 
 fn math_parse_operation(s: &str) -> IResult<&str, Vec<MathNode>> {
-    map(tuple((
-            one_of("+-*/"),
+    map(
+        pair(
+            math_parse_operator,
             math_parse_signed_operand
-        )),
-        |mut t| { t.1.insert(0, MathNode::Literal(t.0.to_string())); t.1 }
+        ),
+        |mut p| { p.1.insert(0, p.0); p.1 }
     )(s)
 }
 
 fn math_parse_signed_operand(s: &str) -> IResult<&str, Vec<MathNode>> {
-    map(tuple((
+    map(
+        pair(
             math_parse_signs,
             math_parse_operand
-        )),
-        |mut t| { t.0.push(t.1); t.0 }
+        ),
+        |mut p| { p.0.push(p.1); p.0 }
     )(s)
 }
 
 fn math_parse_signs(s: &str) -> IResult<&str, Vec<MathNode>> {
     many0(map(
         one_of("+-"),
-        |c| { MathNode::Literal(c.to_string()) }
+        |c| { MathNode::Op(match c {
+            '+' => Operator::Plus,
+            '-' => Operator::Minus,
+            _ => unreachable!(),
+        }) }
     ))(s)
+}
+
+fn math_parse_operator(s: &str) -> IResult<&str, MathNode> {
+    use Operator::*;
+    map(
+        one_of("+-*/"),
+        |c| { MathNode::Op(match c {
+            '+' => Plus,
+            '-' => Minus,
+            '*' => Times,
+            '/' => Div,
+            _ => unreachable!(),
+        })}
+    )(s)
 }
 
 fn math_number(s: &str) -> IResult<&str, MathNode> {
     match s.parse::<f32>() {
-        Ok(f) => Ok(("", MathNode::Literal(f.to_string()))),
+        Ok(f) => Ok(("", MathNode::Number(f))),
         Err(_) => Err(nom::Err::Error((s, nom::error::ErrorKind::Float)))
     }
 }
@@ -676,29 +719,31 @@ mod test {
 
     #[test]
     fn math_parsing() {
-        use MathNode::*;
+        use EqOperator::*;
+        use Operator::*;
         use PropertyName::*;
+        use MathNode::*;
 
         // number literals get normalised
         assert_eq!(parse_math("0.1+.1<1.+1").unwrap(),
             SearchNode::Math(vec![
-                Literal("0.1".to_string()),
-                Literal("+".to_string()),
-                Literal("0.1".to_string()),
-                Literal("<".to_string()),
-                Literal("1".to_string()),
-                Literal("+".to_string()),
-                Literal("1".to_string()),
+                Number(0.1),
+                Operator(Plus),
+                Number(0.1),
+                EqOperator(Less),
+                Number(1.),
+                Operator(Plus),
+                Number(1.),
             ])
         );
 
         // chained signs are valid
         assert_eq!(parse_math("+-ease=ivl").unwrap(),
             SearchNode::Math(vec![
-                Literal("+".to_string()),
-                Literal("-".to_string()),
+                Operator(Plus),
+                Operator(Minus),
                 Property(Ease),
-                Literal("=".to_string()),
+                EqOperator(Eq),
                 Property(Ivl),
             ])
         );
@@ -707,7 +752,7 @@ mod test {
         assert_eq!(parse_math("s p a c e!=space").unwrap(),
             SearchNode::Math(vec![
                 Field("s p a c e".to_string()),
-                Literal("!=".to_string()),
+                EqOperator(Neq),
                 Field("space".to_string()),
             ])
         );

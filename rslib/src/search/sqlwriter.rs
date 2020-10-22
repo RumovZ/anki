@@ -1,7 +1,17 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::parser::{Node, PropertyKind, SearchNode, StateKind, TemplateKind, MathNode, PropertyName};
+use super::parser::{
+    Node,
+    PropertyKind,
+    SearchNode,
+    StateKind,
+    TemplateKind,
+    MathNode,
+    PropertyName,
+    EqOperator,
+    Operator
+};
 use crate::{
     card::{CardQueue, CardType},
     collection::Collection,
@@ -463,15 +473,32 @@ impl SqlWriter<'_> {
 
     fn write_math(&mut self, nodes: &Vec<MathNode>) -> Result<()> {
         use MathNode::*;
+        use EqOperator::*;
+        use Operator::*;
         let mut due = false;
         let mut query = Vec::new();
         let mut fields = Vec::new();
         for node in nodes {
             match node {
-                Literal(l) => query.push(l.to_string()),
-                Property(p) => query.push(self.prop_to_str(p, &mut due)?),
-                Field(f) => {
-                    fields.push((query.len(), f));
+                EqOp(s) => query.push(match s {
+                    Eq => "=",
+                    Neq => "!=",
+                    Less => "<",
+                    LessEq => "<=",
+                    Greater => ">",
+                    GreaterEq => ">=",
+                }.to_string()),
+                Op(s) => query.push(match s {
+                    Plus => "+",
+                    Minus => "-",
+                    Times => "*",
+                    // convert to real number before division
+                    Div => "* 1. /",
+                }.to_string()),
+                Number(s) => query.push(s.to_string()),
+                Property(s) => query.push(self.prop_to_str(s, &mut due)?),
+                Field(s) => {
+                    fields.push((query.len(), s));
                     query.push("".to_string());
                 },
             };
@@ -533,11 +560,12 @@ impl SqlWriter<'_> {
             Due => {
                 *due = true;
                 let days = self.col.timing_today()?.days_elapsed as i32;
-                format!("((due - {}) * 1.)", days)
+                format!("(due - {})", days)
             },
-            Ivl => "(ivl * 1.)".to_string(),
-            Reps => "(reps * 1.)".to_string(),
-            Lapses => "(lapses * 1.)".to_string(),
+            Ivl => "ivl".to_string(),
+            Reps => "reps".to_string(),
+            Lapses => "lapses".to_string(),
+            // dot for real division
             Ease => "(factor / 1000.)".to_string(),
         };
         Ok(result)
