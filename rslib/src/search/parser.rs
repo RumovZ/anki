@@ -124,7 +124,7 @@ pub(super) enum MathNode {
     EqOp(EqOperator),
     Op(Operator),
     Number(f32),
-    Property(PropertyName),
+    Prop(PropertyName),
     Field(String),
 }
 
@@ -144,6 +144,8 @@ pub(super) enum Operator {
     Minus,
     Times,
     Div,
+    Open,
+    Close,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -525,7 +527,7 @@ fn math_parse_signed_operand(s: &str) -> IResult<&str, Vec<MathNode>> {
             math_parse_signs,
             math_parse_operand
         ),
-        |mut p| { p.0.push(p.1); p.0 }
+        |mut p| { p.0.extend(p.1); p.0 }
     )(s)
 }
 
@@ -554,38 +556,60 @@ fn math_parse_operator(s: &str) -> IResult<&str, MathNode> {
     )(s)
 }
 
-fn math_number(s: &str) -> IResult<&str, MathNode> {
+fn math_parse_operand(s: &str) -> IResult<&str, Vec<MathNode>> {
+    alt((
+        math_parenthesised,
+        map_parser(
+            escaped(is_not(r"\+-*/!=<>()"), '\\', anychar),
+            alt((math_prop, math_number, math_field))
+        )
+    ))(s)
+}
+
+fn math_number(s: &str) -> IResult<&str, Vec<MathNode>> {
     match s.parse::<f32>() {
-        Ok(f) => Ok(("", MathNode::Number(f))),
+        Ok(f) => Ok(("", vec![MathNode::Number(f)])),
         Err(_) => Err(nom::Err::Error((s, nom::error::ErrorKind::Float)))
     }
 }
 
-fn math_prop(s: &str) -> IResult<&str, MathNode> {
+fn math_prop(s: &str) -> IResult<&str, Vec<MathNode>> {
     use PropertyName::*;
-    Ok(("", MathNode::Property(match s {
+    Ok(("", vec![MathNode::Prop(match s {
         "ivl" => Ivl,
         "due" => Due,
         "reps" => Reps,
         "lapses" => Lapses,
         "ease" => Ease,
         _ => return Err(nom::Err::Error((s, nom::error::ErrorKind::Tag)))
-    })))
+    })]))
 }
 
-fn math_field(s: &str) -> IResult<&str, MathNode> {
+fn math_field(s: &str) -> IResult<&str, Vec<MathNode>> {
+    if s.is_empty() {
+        return Err(nom::Err::Error((s, nom::error::ErrorKind::Not)));
+    }
     lazy_static! {
         static ref RE: Regex = Regex::new(r"\\(.)").unwrap();
     }
-    Ok(("", MathNode::Field(RE.replace_all(s, "$1").to_string())))
+    Ok(("", vec![MathNode::Field(RE.replace_all(s, "$1").to_string())]))
 }
 
-fn math_parse_operand(s: &str) -> IResult<&str, MathNode> {
-    map_parser(
-        escaped(is_not(r"\+-*/!=<>()"), '\\', anychar),
-        alt((math_prop, math_number, math_field))
+fn math_parenthesised(s: &str) -> IResult<&str, Vec<MathNode>> {
+    map(
+        tuple((
+            char('('),
+            math_parse_expression,
+            char(')'),
+        )),
+        |mut t| {
+            t.1.insert(0, MathNode::Op(Operator::Open));
+            t.1.push(MathNode::Op(Operator::Close));
+            t.1
+        }
     )(s)
 }
+
 
 #[cfg(test)]
 mod test {
@@ -721,67 +745,92 @@ mod test {
     }
 
     #[test]
-    fn math_parsing() {
+    fn math_parsing() -> Result<()> {
+        use Node::*;
+        use SearchNode::*;
         use EqOperator::*;
         use Operator::*;
         use PropertyName::*;
         use MathNode::*;
 
-        // number literals get normalised
-        assert_eq!(parse_math("0.1+.1<1.+1").unwrap(),
-            SearchNode::Math(vec![
+        // all unambiguous dot notations are valid
+        assert_eq!(parse("math:0.1+.1<1.+1")?,
+            vec![Search(Math(vec![
                 Number(0.1),
-                Operator(Plus),
+                Op(Plus),
                 Number(0.1),
-                EqOperator(Less),
+                EqOp(Less),
                 Number(1.),
-                Operator(Plus),
+                Op(Plus),
                 Number(1.),
-            ])
+            ]))]
         );
 
         // chained signs are valid
-        assert_eq!(parse_math("+-ease=ivl").unwrap(),
-            SearchNode::Math(vec![
-                Operator(Plus),
-                Operator(Minus),
-                Property(Ease),
-                EqOperator(Eq),
-                Property(Ivl),
-            ])
+        assert_eq!(parse("math:+-ease=ivl")?,
+            vec![Search(Math(vec![
+                Op(Plus),
+                Op(Minus),
+                Prop(Ease),
+                EqOp(Eq),
+                Prop(Ivl),
+            ]))]
         );
 
         // fields may contain spaces
-        assert_eq!(parse_math("s p a c e!=space").unwrap(),
-            SearchNode::Math(vec![
+        assert_eq!(parse("\"math:s p a c e!=space\"")?,
+            vec![Search(Math(vec![
                 Field("s p a c e".to_string()),
-                EqOperator(Neq),
+                EqOp(Neq),
                 Field("space".to_string()),
-            ])
+            ]))]
         );
 
         // (only) fields may contain escaped characters
-        assert_eq!(parse_math(r"\ivl+2\-1>=f\!e\\d").unwrap(),
-            SearchNode::Math(vec![
+        assert_eq!(parse(r"math:\ivl+2\-1>=f\!e\\d")?,
+            vec![Search(Math(vec![
                 Field("ivl".to_string()),
-                Operator(Plus),
+                Op(Plus),
                 Field("2-1".to_string()),
-                EqOperator(GreaterEq),
+                EqOp(GreaterEq),
                 Field(r"f!e\d".to_string()),
-            ])
+            ]))]
+        );
+
+        // parenthesised expressions are valid (in quoted queries)
+        assert_eq!(parse("\"math:(2*3)+(3)=9\"")?,
+            vec![Search(Math(vec![
+                Op(Open),
+                Number(2.),
+                Op(Times),
+                Number(3.),
+                Op(Close),
+                Op(Plus),
+                Op(Open),
+                Number(3.),
+                Op(Close),
+                EqOp(Eq),
+                Number(9.),
+            ]))]
         );
 
         // chained operators are invalid
-        assert!(parse_math("1-*1<0").is_err());
+        assert!(parse("math:1-*1<0").is_err());
 
         // one and only one equality operator is valid
-        assert!(parse_math("1<2<3").is_err());
-        assert!(parse_math("1!2").is_err());
-        assert!(parse_math("123").is_err());
+        assert!(parse("math:1<2<3").is_err());
+        assert!(parse("math:1!2").is_err());
+        assert!(parse("math:123").is_err());
 
         // incomplete expressions are invalid
-        assert!(parse_math("1>0*").is_err());
-        assert!(parse_math("!=1").is_err());
-        assert!(parse_math("-=minus").is_err());
+        assert!(parse("math:1>0*").is_err());
+        assert!(parse("math:!=1").is_err());
+        assert!(parse("math:-=minus").is_err());
+
+        // dangling parentheses are
+        assert!(parse("\"math:(1>0\"").is_err());
+        assert!(parse("\"math:1>0)\"").is_err());
+
+        Ok(())
     }
 }

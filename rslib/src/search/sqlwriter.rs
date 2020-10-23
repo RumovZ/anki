@@ -494,9 +494,11 @@ impl SqlWriter<'_> {
                     Times => "*",
                     // convert to real number before division
                     Div => "* 1. /",
+                    Open => "(",
+                    Close => ")",
                 }.to_string()),
                 Number(s) => query.push(s.to_string()),
-                Property(s) => query.push(self.prop_to_str(s, &mut due)?),
+                Prop(s) => query.push(self.prop_to_str(s, &mut due)?),
                 Field(s) => {
                     fields.push((query.len(), s));
                     query.push("".to_string());
