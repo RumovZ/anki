@@ -2,15 +2,8 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 use super::parser::{
-    Node,
-    PropertyKind,
-    SearchNode,
-    StateKind,
+    EqOperator, MathNode, Node, Operator, PropertyKind, PropertyName, SearchNode, StateKind,
     TemplateKind,
-    MathNode,
-    PropertyName,
-    EqOperator,
-    Operator
 };
 use crate::{
     card::{CardQueue, CardType},
@@ -471,38 +464,44 @@ impl SqlWriter<'_> {
         self.write_regex(&format!(r"\b{}\b", re))
     }
 
-    fn write_math(&mut self, nodes: &Vec<MathNode>) -> Result<()> {
-        use MathNode::*;
+    fn write_math(&mut self, nodes: &[MathNode]) -> Result<()> {
         use EqOperator::*;
+        use MathNode::*;
         use Operator::*;
         let mut due = false;
         let mut query = Vec::new();
         let mut fields = Vec::new();
         for node in nodes {
             match node {
-                EqOp(s) => query.push(match s {
-                    Eq => "=",
-                    Neq => "!=",
-                    Less => "<",
-                    LessEq => "<=",
-                    Greater => ">",
-                    GreaterEq => ">=",
-                }.to_string()),
-                Op(s) => query.push(match s {
-                    Plus => "+",
-                    Minus => "-",
-                    Times => "*",
-                    // convert to real number before division
-                    Div => "* 1. /",
-                    Open => "(",
-                    Close => ")",
-                }.to_string()),
+                EqOp(s) => query.push(
+                    match s {
+                        Eq => "=",
+                        Neq => "!=",
+                        Less => "<",
+                        LessEq => "<=",
+                        Greater => ">",
+                        GreaterEq => ">=",
+                    }
+                    .to_string(),
+                ),
+                Op(s) => query.push(
+                    match s {
+                        Plus => "+",
+                        Minus => "-",
+                        Times => "*",
+                        // convert to real number before division
+                        Div => "* 1. /",
+                        Open => "(",
+                        Close => ")",
+                    }
+                    .to_string(),
+                ),
                 Number(s) => query.push(s.to_string()),
                 Prop(s) => query.push(self.prop_to_str(s, &mut due)?),
                 Field(s) => {
                     fields.push((query.len(), s));
                     query.push("".to_string());
-                },
+                }
             };
         }
         if due {
@@ -511,7 +510,8 @@ impl SqlWriter<'_> {
                 "c.queue in ({rev},{daylrn}) and ",
                 rev = CardQueue::Review as u8,
                 daylrn = CardQueue::DayLearn as u8,
-            ).unwrap();
+            )
+            .unwrap();
         }
         if fields.is_empty() {
             write!(self.sql, "({})", query.join(" ")).unwrap();
@@ -545,16 +545,12 @@ impl SqlWriter<'_> {
                         ords.next().unwrap(),
                     );
                 }
-                searches.push(format!(
-                    "(n.mid = {} and {})",
-                    nt_map.0,
-                    query.join(" ")
-                ));
+                searches.push(format!("(n.mid = {} and {})", nt_map.0, query.join(" ")));
             }
             write!(self.sql, "({})", searches.join(" or ")).unwrap();
             Ok(())
         }
-	}
+    }
 
     fn prop_to_str(&mut self, prop: &PropertyName, due: &mut bool) -> Result<String> {
         use PropertyName::*;
@@ -563,7 +559,7 @@ impl SqlWriter<'_> {
                 *due = true;
                 let days = self.col.timing_today()?.days_elapsed as i32;
                 format!("(due - {})", days)
-            },
+            }
             Ivl => "ivl".to_string(),
             Reps => "reps".to_string(),
             Lapses => "lapses".to_string(),

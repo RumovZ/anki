@@ -9,11 +9,11 @@ use crate::{
 use lazy_static::lazy_static;
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, is_not, tag, take_while1, is_a},
+    bytes::complete::{escaped, is_a, is_not, tag, take_while1},
     character::complete::{anychar, char, one_of},
-    combinator::{all_consuming, map, map_res, map_parser},
-    sequence::{delimited, preceded, tuple, pair},
-    {multi::{many0, fold_many0}, IResult},
+    combinator::{all_consuming, map, map_parser, map_res},
+    sequence::{delimited, pair, preceded, tuple},
+    {multi::many0, IResult},
 };
 use regex::Regex;
 use std::{borrow::Cow, num};
@@ -119,7 +119,7 @@ pub(super) enum TemplateKind {
     Name(String),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub(super) enum MathNode {
     EqOp(EqOperator),
     Op(Operator),
@@ -128,7 +128,7 @@ pub(super) enum MathNode {
     Field(String),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub(super) enum EqOperator {
     Eq,
     Neq,
@@ -138,7 +138,7 @@ pub(super) enum EqOperator {
     GreaterEq,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub(super) enum Operator {
     Plus,
     Minus,
@@ -148,7 +148,7 @@ pub(super) enum Operator {
     Close,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub(super) enum PropertyName {
     Ivl,
     Due,
@@ -478,14 +478,17 @@ fn parse_math(s: &str) -> ParseResult<SearchNode<'static>> {
         math_parse_eq_operator,
         math_parse_expression,
     )))(s)?;
-    Ok(SearchNode::Math( { exp1.push(op); exp1.extend(exp2); exp1 } ))
+    Ok(SearchNode::Math({
+        exp1.push(op);
+        exp1.extend(exp2);
+        exp1
+    }))
 }
 
 fn math_parse_eq_operator(s: &str) -> IResult<&str, MathNode> {
     use EqOperator::*;
-    map_res(
-        is_a("<>=!"),
-        |c: &str| { Ok(MathNode::EqOp( match c {
+    map_res(is_a("<>=!"), |c: &str| {
+        Ok(MathNode::EqOp(match c {
             "!=" => Neq,
             "<=" => LessEq,
             ">=" => GreaterEq,
@@ -493,67 +496,58 @@ fn math_parse_eq_operator(s: &str) -> IResult<&str, MathNode> {
             "<" => Less,
             ">" => Greater,
             _ => return Err(nom::Err::Error((s, nom::error::ErrorKind::Tag))),
-        }))}
-    )(s)
+        }))
+    })(s)
 }
 
 fn math_parse_expression(s: &str) -> IResult<&str, Vec<MathNode>> {
     map(
-        pair(
-            math_parse_signed_operand,
-            fold_many0(
-                math_parse_operation,
-                Vec::new(),
-                |mut v, o| { v.extend(o); v }
-            )
-        ),
-        |mut p| { p.0.extend(p.1); p.0 }
+        pair(math_parse_signed_operand, many0(math_parse_operation)),
+        |mut p| {
+            p.0.extend(p.1.into_iter().flatten().collect::<Vec<MathNode>>());
+            p.0
+        },
     )(s)
 }
 
 fn math_parse_operation(s: &str) -> IResult<&str, Vec<MathNode>> {
     map(
-        pair(
-            math_parse_operator,
-            math_parse_signed_operand
-        ),
-        |mut p| { p.1.insert(0, p.0); p.1 }
+        pair(math_parse_operator, math_parse_signed_operand),
+        |mut p| {
+            p.1.insert(0, p.0);
+            p.1
+        },
     )(s)
 }
 
 fn math_parse_signed_operand(s: &str) -> IResult<&str, Vec<MathNode>> {
-    map(
-        pair(
-            math_parse_signs,
-            math_parse_operand
-        ),
-        |mut p| { p.0.extend(p.1); p.0 }
-    )(s)
+    map(pair(math_parse_signs, math_parse_operand), |mut p| {
+        p.0.extend(p.1);
+        p.0
+    })(s)
 }
 
 fn math_parse_signs(s: &str) -> IResult<&str, Vec<MathNode>> {
-    many0(map(
-        one_of("+-"),
-        |c| { MathNode::Op(match c {
+    many0(map(one_of("+-"), |c| {
+        MathNode::Op(match c {
             '+' => Operator::Plus,
             '-' => Operator::Minus,
             _ => unreachable!(),
-        }) }
-    ))(s)
+        })
+    }))(s)
 }
 
 fn math_parse_operator(s: &str) -> IResult<&str, MathNode> {
     use Operator::*;
-    map(
-        one_of("+-*/"),
-        |c| { MathNode::Op(match c {
+    map(one_of("+-*/"), |c| {
+        MathNode::Op(match c {
             '+' => Plus,
             '-' => Minus,
             '*' => Times,
             '/' => Div,
             _ => unreachable!(),
-        })}
-    )(s)
+        })
+    })(s)
 }
 
 fn math_parse_operand(s: &str) -> IResult<&str, Vec<MathNode>> {
@@ -561,28 +555,31 @@ fn math_parse_operand(s: &str) -> IResult<&str, Vec<MathNode>> {
         math_parenthesised,
         map_parser(
             escaped(is_not(r"\+-*/!=<>()"), '\\', anychar),
-            alt((math_prop, math_number, math_field))
-        )
+            alt((math_prop, math_number, math_field)),
+        ),
     ))(s)
 }
 
 fn math_number(s: &str) -> IResult<&str, Vec<MathNode>> {
     match s.parse::<f32>() {
         Ok(f) => Ok(("", vec![MathNode::Number(f)])),
-        Err(_) => Err(nom::Err::Error((s, nom::error::ErrorKind::Float)))
+        Err(_) => Err(nom::Err::Error((s, nom::error::ErrorKind::Float))),
     }
 }
 
 fn math_prop(s: &str) -> IResult<&str, Vec<MathNode>> {
     use PropertyName::*;
-    Ok(("", vec![MathNode::Prop(match s {
-        "ivl" => Ivl,
-        "due" => Due,
-        "reps" => Reps,
-        "lapses" => Lapses,
-        "ease" => Ease,
-        _ => return Err(nom::Err::Error((s, nom::error::ErrorKind::Tag)))
-    })]))
+    Ok((
+        "",
+        vec![MathNode::Prop(match s {
+            "ivl" => Ivl,
+            "due" => Due,
+            "reps" => Reps,
+            "lapses" => Lapses,
+            "ease" => Ease,
+            _ => return Err(nom::Err::Error((s, nom::error::ErrorKind::Tag))),
+        })],
+    ))
 }
 
 fn math_field(s: &str) -> IResult<&str, Vec<MathNode>> {
@@ -592,24 +589,22 @@ fn math_field(s: &str) -> IResult<&str, Vec<MathNode>> {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"\\(.)").unwrap();
     }
-    Ok(("", vec![MathNode::Field(RE.replace_all(s, "$1").to_string())]))
+    Ok((
+        "",
+        vec![MathNode::Field(RE.replace_all(s, "$1").to_string())],
+    ))
 }
 
 fn math_parenthesised(s: &str) -> IResult<&str, Vec<MathNode>> {
     map(
-        tuple((
-            char('('),
-            math_parse_expression,
-            char(')'),
-        )),
-        |mut t| {
-            t.1.insert(0, MathNode::Op(Operator::Open));
-            t.1.push(MathNode::Op(Operator::Close));
-            t.1
-        }
+        delimited(char('('), math_parse_expression, char(')')),
+        |mut v| {
+            v.insert(0, MathNode::Op(Operator::Open));
+            v.push(MathNode::Op(Operator::Close));
+            v
+        },
     )(s)
 }
-
 
 #[cfg(test)]
 mod test {
@@ -746,15 +741,16 @@ mod test {
 
     #[test]
     fn math_parsing() -> Result<()> {
-        use Node::*;
-        use SearchNode::*;
         use EqOperator::*;
+        use MathNode::*;
+        use Node::*;
         use Operator::*;
         use PropertyName::*;
-        use MathNode::*;
+        use SearchNode::*;
 
         // all unambiguous dot notations are valid
-        assert_eq!(parse("math:0.1+.1<1.+1")?,
+        assert_eq!(
+            parse("math:0.1+.1<1.+1")?,
             vec![Search(Math(vec![
                 Number(0.1),
                 Op(Plus),
@@ -767,7 +763,8 @@ mod test {
         );
 
         // chained signs are valid
-        assert_eq!(parse("math:+-ease=ivl")?,
+        assert_eq!(
+            parse("math:+-ease=ivl")?,
             vec![Search(Math(vec![
                 Op(Plus),
                 Op(Minus),
@@ -778,7 +775,8 @@ mod test {
         );
 
         // fields may contain spaces
-        assert_eq!(parse("\"math:s p a c e!=space\"")?,
+        assert_eq!(
+            parse("\"math:s p a c e!=space\"")?,
             vec![Search(Math(vec![
                 Field("s p a c e".to_string()),
                 EqOp(Neq),
@@ -787,7 +785,8 @@ mod test {
         );
 
         // (only) fields may contain escaped characters
-        assert_eq!(parse(r"math:\ivl+2\-1>=f\!e\\d")?,
+        assert_eq!(
+            parse(r"math:\ivl+2\-1>=f\!e\\d")?,
             vec![Search(Math(vec![
                 Field("ivl".to_string()),
                 Op(Plus),
@@ -798,7 +797,8 @@ mod test {
         );
 
         // parenthesised expressions are valid (in quoted queries)
-        assert_eq!(parse("\"math:(2*3)+(3)=9\"")?,
+        assert_eq!(
+            parse("\"math:(2*3)+(3)=9\"")?,
             vec![Search(Math(vec![
                 Op(Open),
                 Number(2.),
@@ -827,7 +827,7 @@ mod test {
         assert!(parse("math:!=1").is_err());
         assert!(parse("math:-=minus").is_err());
 
-        // dangling parentheses are
+        // dangling parentheses are invalid
         assert!(parse("\"math:(1>0\"").is_err());
         assert!(parse("\"math:1>0)\"").is_err());
 
