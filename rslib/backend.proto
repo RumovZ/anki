@@ -279,7 +279,7 @@ service SearchService {
 }
 
 service StatsService {
-  rpc CardStats(CardId) returns (String);
+  rpc CardStats(CardId) returns (CardStatsResponse);
   rpc Graphs(GraphsRequest) returns (GraphsResponse);
   rpc GetGraphPreferences(Empty) returns (GraphPreferences);
   rpc SetGraphPreferences(GraphPreferences) returns (Empty);
@@ -1327,6 +1327,21 @@ message ExtendLimitsRequest {
 message CountsForDeckTodayResponse {
   int32 new = 1;
   int32 review = 2;
+}
+
+message CardStatsResponse {
+  int64 card_id = 1;
+  int64 note_id = 2;
+  string deck = 3;
+  int64 added = 4;
+  optional int64 first_review = 5;
+  optional int64 latest_review = 6;
+  int64 added = 4;
+  int64 added = 4;
+  int64 added = 4;
+  int64 added = 4;
+  int64 added = 4;
+  int64 added = 4;
 }
 
 message GraphsRequest {
